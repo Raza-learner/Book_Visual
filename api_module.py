@@ -11,15 +11,71 @@ from prompts import (
     MAX_VALIDATION_ERROR_TRY,
     SUMMARY_ROLE,
     SUMMARY_VALIDATION_RESOLVE_ROLE,
+    IMAGE_STYLE_PROMPT
 )
 from json.decoder import JSONDecodeError
 import os
 from dotenv import load_dotenv
 import time
+import base64
+from io import BytesIO
+from PIL import Image
+import uuid
 
 load_dotenv()
 summary_role = ""
 
+class RunwareImageAPI:
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+        self.url = "https://api.runware.ai/v1/image/inference"
+
+    def generate_image(self, prompt: str, chunk_id: str,    style: str = IMAGE_STYLE_PROMPT) -> str:
+        task_uuid = str(uuid.uuid4())
+        task_uuid = str(uuid.uuid4())
+        payload = [
+            {
+                "taskType": "imageInference",
+                "taskUUID": task_uuid,
+                "model": "runware:100@1",
+                "positivePrompt": prompt,
+                "steps": 18,
+                "width": 512,
+                "height": 512,
+                "numberResults": 1,
+                "outputType": "base64Data",
+            }
+        ]
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+
+        response = requests.post(self.url, headers=headers, json=payload)
+        if response.status_code == 200:
+            result = response.json()
+            try:
+                if isinstance(result, list) and result:
+                    image_data = result[0]["imageBase64Data"]
+                elif "data" in result and result["data"]:
+                    image_data = result["data"][0]["imageBase64Data"]
+                elif "imageBase64Data" in result:
+                    image_data = result["imageBase64Data"]
+                else:
+                    raise KeyError("Could not find 'imageBase64Data' in response")
+                
+                image_bytes = base64.b64decode(image_data)
+                image = Image.open(BytesIO(image_bytes))
+                os.makedirs("./image_out", exist_ok=True)
+                image_path = f"./image_out/generated_image_{chunk_id}.png"
+                image.save(image_path)
+                return image_path
+            except KeyError as e:
+                logger.error(f"Error extracting image data: {str(e)}. Response: {result}")
+                return ""
+        else:
+            logger.error(f"Runware API error: {response.status_code} - {response.text}")
+            return ""
 
 ## HeadersSchema
 class HeadersSchema(BaseModel):
@@ -33,11 +89,9 @@ class HeadersSchema(BaseModel):
     class Config:
         populate_by_name = True
 
-
 class MessageSchema(BaseModel):
     role: str
     content: str
-
 
 class SummaryPayloadSchema(BaseModel):
     model: str
@@ -46,17 +100,18 @@ class SummaryPayloadSchema(BaseModel):
     stream: bool
     max_completion_tokens: int = 2048
     response_format: Dict[str, str] = {"type": "json_object"}
-
+    top_p: float = 0.8
+    frequency_penalty: float = 1.0
+    presence_penalty: float = 1.5
 
 class SummaryResponseSchema(BaseModel):
     summary: str
     characters: Dict[str, str]
     places: Dict[str, str]
 
-
 class SummaryOutputSchema(SummaryResponseSchema):
     id: str
-
+    image_url: str = ""
 
 class SummaryContentSchema(BaseModel):
     past_context: str
@@ -64,10 +119,7 @@ class SummaryContentSchema(BaseModel):
     character_list: Dict[str, str]
     places_list: Dict[str, str]
 
-
 ##Requests
-
-
 class LLM_API(ABC):
     @abstractmethod
     def messages(
@@ -85,7 +137,6 @@ class LLM_API(ABC):
     ) -> Optional[Type[BaseModel]]:
         pass
 
-
 @dataclass
 class Summary:
     api_key: str
@@ -95,7 +146,7 @@ class Summary:
     )
     validation_role: str = f"{SUMMARY_VALIDATION_RESOLVE_ROLE} Schema :{SummaryOutputSchema.model_json_schema()}"
     model: str = "llama-3.1-8b-instant"
-    temperature: float = 0.1
+    temperature: float = 0.4
     stream: bool = False
     repetition_penalty: float = 1.5
     max_tokens: int = 6000
@@ -145,20 +196,16 @@ class Summary:
             assistant_message = response_data["choices"][0]["message"]["content"]
             return code, assistant_message
         else:
-            logger.warning(f"Error: {response.json()}")
-            return code, "ERROR_API_CALL"
+            try:
+                if response.json()["error"]["code"] == "json_validate_failed":
+                    return 422, response.json()["error"]["failed_generation"]
+            except:
+                logger.warning(f"Error: {response.json()}")
+                return code, "ERROR_API_CALL"
 
     def validate_json(
         self, raw_data: str, schema: Type[SummaryResponseSchema]
     ) -> Union[SummaryResponseSchema, bool]:
-        """
-        Validates JSON data against a provided Pydantic schema.
-
-        :param data: JSON string to be validated.
-        :param schema: A Pydantic model class to validate against.
-        :return: A tuple where the first element is a boolean indicating if there was an error,
-                 and the second element is either the validated data or a list of error details.
-        """
         try:
             parsed_data = json.loads(raw_data)
             validated_data = schema.model_validate(parsed_data)
@@ -167,12 +214,15 @@ class Summary:
             logger.warning("ValidationError")
             return False
 
-
 class SummaryLoop(BaseModel):
     content: List[Tuple[str, str]]
     summary: Summary
+    image_api: Optional[RunwareImageAPI] = None
     summary_pool: List[SummaryOutputSchema] = Field(default_factory=list)
     chunked_content: List[Tuple[str, str, str]] = Field(default_factory=list)
+
+    class Config:
+        arbitrary_types_allowed = True
 
     def initialize(self) -> Optional["SummaryLoop"]:
         hf_api = os.environ.get("HF_API")
@@ -186,6 +236,7 @@ class SummaryLoop(BaseModel):
                 places={},
                 characters={},
                 id="",
+                image_url=""
             ),
         ]
         tokenizer = Tokenizer(api_key=hf_api)
@@ -198,9 +249,6 @@ class SummaryLoop(BaseModel):
         return self
 
     def run(self) -> None:
-        """
-        Assuming book comes in the form of ((id,title_chapter,chapter_content),..)
-        """
         for idx, (id, title, content) in enumerate(self.chunked_content):
             past_context = self.summary_pool[idx]
             message = self.summary.get_messages(
@@ -217,95 +265,114 @@ class SummaryLoop(BaseModel):
                 )
 
                 if validated_response:
+                    image_url = ""
+                    if self.image_api:
+                        # Use LLM output directly for the image prompt
+                        summary = validated_response.summary
+                        characters_str = ", ".join([f"{k} ({v})" for k, v in validated_response.characters.items()])
+                        places_str = ", ".join([f"{k} ({v})" for k, v in validated_response.places.items()])
+                        image_prompt = (
+                            f"{summary} Featuring characters: {characters_str}. "
+                            f"Set in places: {places_str}. "
+                            
+                        )
+                        image_url = self.image_api.generate_image(image_prompt, chunk_id=id)
+                    
                     logger.trace(f"Chunk_{id=} Done")
                     self.summary_pool.append(
                         SummaryOutputSchema(
-                            **(validated_response.model_dump(by_alias=True)), id=id
+                            **(validated_response.model_dump(by_alias=True)),
+                            id=id,
+                            image_url=image_url
                         )
                     )
-                    
                     continue
                 else:
                     output = self.handle_validation_error(response)
                     if output:
                         past_context = output
+            elif status_code == 422:
+                output = self.handle_validation_error(response)
             elif status_code == 400:
                 self.summary_pool.append(past_context)
-                logger.warning(f"error getting {id=}")
+                logger.warning(f"{status_code=} error getting{id=}")
 
     def handle_validation_error(self, input_text):
         message = self.summary.validation_messages(input_text)
-        for _ in range(MAX_VALIDATION_ERROR_TRY):
-            err, response = self.summary.get(messages=message)
-            if not err:
+        for idx in range(MAX_VALIDATION_ERROR_TRY):
+            status_code, response = self.summary.get(messages=message)
+            if status_code == 200:
                 validated_response = self.summary.validate_json(
                     response, SummaryResponseSchema
                 )
                 if validated_response:
+                    logger.info("Validation error resolved")
                     return validated_response
+            elif status_code == 422:
+                message = self.summary.validation_messages(response)
+            logger.warning(f"Validation Unresolved on try {idx + 1}")
         logger.error("COULDNT VALIDATE THE CHUNK, SKIPPING...")
         return None
-
 
     @property
     def get_summary_pool(self):
         return self.summary_pool
 
-# Existing imports remain unchanged
-from audio_module import loop_for_speech  # Add this import
-
 async def test() -> None:
     from reader import ebook
 
     api = os.environ.get("GROQ_API")
+    runware_api_key = os.environ.get("RUNWARE_API")
     if not api:
         raise Exception("API NOT SET IN .env, GROQ_API=None")
+    if not runware_api_key:
+        raise Exception("RUNWARE_API NOT SET IN .env")
+
+    image_api = RunwareImageAPI(api_key=runware_api_key)
 
     book = ebook("./HP.epub")
-    chapter_content = book.get_chapters()
-    
-    sum = Summary(
-        api_key=api,
-    )
-    
-    looper = SummaryLoop(content=chapter_content, summary=sum).initialize()
+    chapter_content = book.get_chapters()[1:6]
+    sum = Summary(api_key=api)
+    from audio_module import loop_for_speech
+
+    looper = SummaryLoop(content=chapter_content, summary=sum, image_api=image_api).initialize()
     if not looper:
         return None
-    
-    # Run the summarization process
     looper.run()
+    
+    summary_texts = []
+    for i in looper.get_summary_pool:
+        if not i.summary:
+            continue
+        text = f"Chapter {i.id}. Summary: {i.summary}"
+        summary_texts.append((i.id, text))
 
-    # Extract summaries from summary_pool (skip the initial empty context at index 0)
-    summaries = [(item.id, item.summary) for item in looper.get_summary_pool[1:] if item.summary]
+    if summary_texts:
+        audio_outputs = loop_for_speech(summary_texts)
+        os.makedirs("./audio_out", exist_ok=True)
+        for idx, (chapter_id, audio_content) in enumerate(audio_outputs):
+            if audio_content:
+                audio_file = f"./audio_out/summary_chapter_{chapter_id}.mp3"
+                with open(audio_file, "wb") as file:
+                    file.write(audio_content)
+                logger.info(f"Audio saved for Chapter {chapter_id} at {audio_file}")
+            else:
+                logger.warning(f"Audio generation failed for Chapter {chapter_id}")
 
-    # Generate audio for summaries only
-    audio_outputs = loop_for_speech(summaries)
-
-    # Save the audio files
-    for idx, audio_data in audio_outputs:
-        if audio_data:
-            audio_file_path = f"./audio_out/summary_{idx}.mp3"
-            os.makedirs(os.path.dirname(audio_file_path), exist_ok=True)
-            with open(audio_file_path, "wb") as file:
-                file.write(audio_data)
-            print(f"Audio saved for summary of chapter {idx}: {audio_file_path}")
-        else:
-            logger.warning(f"Audio for summary of chapter {idx} is None")
-
-    # Optional: Print summary details for verification
-    for i in looper.get_summary_pool[1:]:  # Skip the initial empty context
+    for i in looper.get_summary_pool:
         if not i.places or not i.characters:
             continue
         print("-" * 50)
         print(f"Chapter:{i.id}")
         print("Summary")
         print(f"\t - {i.summary}")
+        print(f"Image Path: {i.image_url}")
         print()
-        print("Characters")
+        print("characters")
         for k, v in i.characters.items():
             print(f"\t - {k} : {v}")
         print()
-        print("Places")
+        print("places")
         for k, v in i.places.items():
             print(f"\t - {k} : {v}")
         print("\n\n")
