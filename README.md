@@ -1,7 +1,7 @@
 # Book Helper
 
 ```
-api_module.py is the main module tht handles groq api 
+api_module.py is the main module that handles groq api and runware image generation model. 
 api_module depends on utils.py and logger_module.py
 
 api_module requires GROQ_API in .env file 
