@@ -2,7 +2,7 @@
 
 ```
 api_module.py is the main module that handles groq api and runware image generation model. 
-api_module depends on utils.py and logger_module.py
+api_module depends on utils.py,audio_module.py,prompts.py and logger_module.py
 
 api_module requires GROQ_API in .env file 
 utils requires HF_API in .env file
