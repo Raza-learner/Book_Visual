@@ -29,21 +29,26 @@ class RunwareImageAPI:
     def __init__(self, api_key: str):
         self.api_key = api_key
         self.url = "https://api.runware.ai/v1/image/inference"
-
+        self.theme = "anime"  # Changed to cartoonish theme
+        self.base_seed = 42
     def generate_image(self, prompt: str, chunk_id: str,    style: str = IMAGE_STYLE_PROMPT) -> str:
         task_uuid = str(uuid.uuid4())
         task_uuid = str(uuid.uuid4())
+        themed_prompt = f"{self.theme} style, {prompt}, bold outlines, vibrant colors, exaggerated features, playful and whimsical"
+        negative_prompt = "realistic, photorealistic, dark, dystopian, blurry, low quality"  # Exclude non-cartoonish elements
         payload = [
             {
                 "taskType": "imageInference",
                 "taskUUID": task_uuid,
-                "model": "runware:100@1",
-                "positivePrompt": prompt,
+                "model": "runware:100@1",  
+                "positivePrompt": themed_prompt,
+                "negativePrompt": negative_prompt,  
                 "steps": 18,
                 "width": 512,
                 "height": 512,
                 "numberResults": 1,
                 "outputType": "base64Data",
+                "seed": self.base_seed,
             }
         ]
         headers = {
