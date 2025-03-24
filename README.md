@@ -1,4 +1,4 @@
-# Book Helper
+# Book Visualizer
 
 ```
 api_module.py is the main module that handles groq api and runware image generation model. 
