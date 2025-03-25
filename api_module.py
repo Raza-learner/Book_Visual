@@ -17,70 +17,10 @@ from json.decoder import JSONDecodeError
 import os
 from dotenv import load_dotenv
 import time
-import base64
-from io import BytesIO
-from PIL import Image
-import uuid
+from image_module import RunwareImageAPI  # Import the image generation class
 
 load_dotenv()
 summary_role = ""
-
-class RunwareImageAPI:
-    def __init__(self, api_key: str):
-        self.api_key = api_key
-        self.url = "https://api.runware.ai/v1/image/inference"
-        self.theme = "anime"  # Changed to cartoonish theme
-        self.base_seed = 42
-    def generate_image(self, prompt: str, chunk_id: str,    style: str = IMAGE_STYLE_PROMPT) -> str:
-        task_uuid = str(uuid.uuid4())
-        task_uuid = str(uuid.uuid4())
-        themed_prompt = f"{self.theme} style, {prompt}, bold outlines, vibrant colors, exaggerated features, playful and whimsical"
-        negative_prompt = "realistic, photorealistic, dark, dystopian, blurry, low quality"  # Exclude non-cartoonish elements
-        payload = [
-            {
-                "taskType": "imageInference",
-                "taskUUID": task_uuid,
-                "model": "runware:100@1",  
-                "positivePrompt": themed_prompt,
-                "negativePrompt": negative_prompt,  
-                "steps": 18,
-                "width": 512,
-                "height": 512,
-                "numberResults": 1,
-                "outputType": "base64Data",
-                "seed": self.base_seed,
-            }
-        ]
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
-        }
-
-        response = requests.post(self.url, headers=headers, json=payload)
-        if response.status_code == 200:
-            result = response.json()
-            try:
-                if isinstance(result, list) and result:
-                    image_data = result[0]["imageBase64Data"]
-                elif "data" in result and result["data"]:
-                    image_data = result["data"][0]["imageBase64Data"]
-                elif "imageBase64Data" in result:
-                    image_data = result["imageBase64Data"]
-                else:
-                    raise KeyError("Could not find 'imageBase64Data' in response")
-                
-                image_bytes = base64.b64decode(image_data)
-                image = Image.open(BytesIO(image_bytes))
-                os.makedirs("./image_out", exist_ok=True)
-                image_path = f"./image_out/generated_image_{chunk_id}.png"
-                image.save(image_path)
-                return image_path
-            except KeyError as e:
-                logger.error(f"Error extracting image data: {str(e)}. Response: {result}")
-                return ""
-        else:
-            logger.error(f"Runware API error: {response.status_code} - {response.text}")
-            return ""
 
 ## HeadersSchema
 class HeadersSchema(BaseModel):
@@ -124,7 +64,7 @@ class SummaryContentSchema(BaseModel):
     character_list: Dict[str, str]
     places_list: Dict[str, str]
 
-##Requests
+## Requests
 class LLM_API(ABC):
     @abstractmethod
     def messages(
@@ -279,7 +219,6 @@ class SummaryLoop(BaseModel):
                         image_prompt = (
                             f"{summary} Featuring characters: {characters_str}. "
                             f"Set in places: {places_str}. "
-                            
                         )
                         image_url = self.image_api.generate_image(image_prompt, chunk_id=id)
                     
